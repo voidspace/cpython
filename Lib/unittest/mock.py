@@ -121,6 +121,8 @@ def _check_signature(func, mock, skipfirst, instance=False):
     type(mock)._mock_check_sig = checksig
     type(mock).__signature__ = sig
 
+    return sig
+
 
 def _copy_func_details(func, funcopy):
     # we explicitly don't copy func.__dict__ into this copy as it would
@@ -485,7 +487,11 @@ class NonCallableMock(Base):
         list of strings. Only attributes on the `spec` can be fetched as
         attributes from the mock.
 
-        If `spec_set` is True then only attributes on the spec can be set."""
+        If `spec_set` is True then only attributes on the spec can be set.
+
+        Both `spec` and `spec_set` do function signature validation for
+        mocked methods.
+        """
         self._mock_add_spec(spec, spec_set)
 
 
@@ -507,7 +513,6 @@ class NonCallableMock(Base):
             res = _get_signature_object(spec,
                                         _spec_as_instance, _eat_self)
             _spec_signature = res and res[1]
-
             spec = dir(spec)
 
         __dict__ = self.__dict__
@@ -517,7 +522,9 @@ class NonCallableMock(Base):
         __dict__['_mock_methods'] = spec
         __dict__['_spec_asyncs'] = _spec_asyncs
 
-    def __get_return_value(self):
+    @property
+    def return_value(self):
+        "The value to be returned when the mock is called."
         ret = self._mock_return_value
         if self._mock_delegate is not None:
             ret = self._mock_delegate.return_value
@@ -530,17 +537,13 @@ class NonCallableMock(Base):
         return ret
 
 
-    def __set_return_value(self, value):
+    @return_value.setter
+    def return_value(self, value):
         if self._mock_delegate is not None:
             self._mock_delegate.return_value = value
         else:
             self._mock_return_value = value
             _check_and_set_parent(self, value, None, '()')
-
-    __return_value_doc = "The value to be returned when the mock is called."
-    return_value = property(__get_return_value, __set_return_value,
-                            __return_value_doc)
-
 
     @property
     def __class__(self):
@@ -654,8 +657,7 @@ class NonCallableMock(Base):
 
             result = self._get_child_mock(
                 parent=self, name=name, wraps=wraps, _new_name=name,
-                _new_parent=self
-            )
+                _new_parent=self)
             self._mock_children[name]  = result
 
         elif isinstance(result, _SpecState):
@@ -987,6 +989,7 @@ class NonCallableMock(Base):
             return AsyncMock(**kw)
 
         _type = type(self)
+
         if issubclass(_type, MagicMock) and _new_name in _async_method_magics:
             klass = AsyncMock
         if issubclass(_type, AsyncMockMixin):
@@ -1004,7 +1007,27 @@ class NonCallableMock(Base):
             mock_name = self._extract_mock_name() + attribute
             raise AttributeError(mock_name)
 
-        return klass(**kw)
+        mock = klass(**kw)
+
+        if self.__dict__.get('_mock_methods') is not None:
+            # get the mock's spec attribute with the same name and
+            # pass it to the child.
+            spec_class = self.__dict__.get('_spec_class')
+            spec = getattr(spec_class, _new_name, None)
+            is_async_func = _is_async_func(spec)
+            is_type = isinstance(spec_class, type)
+            eat_self = _must_skip(spec_class, _new_name, is_type)
+
+            breakpoint()
+            if isinstance(spec, FunctionTypes):
+                # should only happen at the top level because we don't
+                # recurse for functions
+                mock = _set_signature(mock, spec)
+                if is_async_func:
+                    _setup_async_mock(mock)
+            else:
+                _check_signature(spec, mock, is_type, eat_self)
+        return mock
 
 
     def _calls_repr(self, prefix="Calls"):
